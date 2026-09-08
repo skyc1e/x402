@@ -646,24 +646,20 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
         const body = event.body().v0();
         const topics = body.topics();
 
-        // Check if this is a transfer event (first topic is "transfer" symbol)
-        if (topics.length < 3) {
-          return invalidVerifyResponse(
-            "invalid_exact_stellar_payload_event_not_transfer",
-            fromAddress,
-          );
-        }
-
-        const topicType = topics[0].switch().name;
-        if (topicType !== "scvSymbol") {
-          return invalidVerifyResponse(
-            "invalid_exact_stellar_payload_event_not_transfer",
-            fromAddress,
-          );
-        }
-
-        const symbol = topics[0].sym().toString();
+        const symbol =
+          topics[0]?.switch().name === "scvSymbol" ? topics[0].sym().toString() : undefined;
         if (symbol !== "transfer") {
+          // Ignore informational events, but reject additional token balance changes.
+          if (symbol === "mint" || symbol === "burn" || symbol === "clawback") {
+            return invalidVerifyResponse(
+              "invalid_exact_stellar_payload_event_not_transfer",
+              fromAddress,
+            );
+          }
+          continue;
+        }
+
+        if (topics.length < 3) {
           return invalidVerifyResponse(
             "invalid_exact_stellar_payload_event_not_transfer",
             fromAddress,

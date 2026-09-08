@@ -13,6 +13,7 @@ import {
   xdr,
   Keypair,
   Asset,
+  nativeToScVal,
 } from "@stellar/stellar-sdk";
 import { Api } from "@stellar/stellar-sdk/rpc";
 import { beforeEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -1106,7 +1107,7 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
         expect(result.invalidReason).toBe("invalid_exact_stellar_payload_no_transfer_events");
       });
 
-      it("should reject when a contract event is not a transfer", async () => {
+      it("should reject mint events", async () => {
         const mockNonTransferEvent = createMockContractEvent({
           from: CLIENT_PUBLIC,
           to: FACILITATOR_PUBLIC,
@@ -1128,6 +1129,103 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
         const result = await facilitator.verify(validPayload, validRequirements);
         expect(result.isValid).toBe(false);
         expect(result.invalidReason).toBe("invalid_exact_stellar_payload_event_not_transfer");
+      });
+
+      describe("informational contract events", () => {
+        const payer = new Address(CLIENT_PUBLIC).toScVal();
+        const recipient = new Address(TRANSACTION_RECIPIENT).toScVal();
+        const policyContract = Address.contract(Buffer.alloc(32, 1)).toScAddress().contractId();
+
+        const verifyEvents = (
+          topics: xdr.ScVal[],
+          contractId = policyContract,
+          transferPosition: "first" | "last" | "none" = "last",
+        ) => {
+          const extraEvent = createMockDiagnosticEvent(
+            new xdr.ContractEventV0({ topics, data: nativeToScVal(1n) }),
+            xdr.ContractEventType.contract(),
+            contractId,
+          );
+          const transferEvent = createMockContractEvent({
+            from: CLIENT_PUBLIC,
+            to: TRANSACTION_RECIPIENT,
+            amount: BigInt(validRequirements.amount),
+            contractId: expectedAssetHash(),
+          });
+          const events = [extraEvent];
+          if (transferPosition === "first") events.unshift(transferEvent);
+          if (transferPosition === "last") events.push(transferEvent);
+          vi.mocked(mockServer.simulateTransaction).mockResolvedValueOnce({
+            id: "test",
+            latestLedger: 123,
+            events,
+            _parsed: true,
+            transactionData: new SorobanDataBuilder(),
+            minResourceFee: "100",
+            cost: { cpuInsns: "0", memBytes: "0" },
+            results: [],
+          } as Api.SimulateTransactionSuccessResponse);
+          return facilitator.verify(validPayload, validRequirements);
+        };
+
+        it.each([
+          ["spending limit", [xdr.ScVal.scvSymbol("spending_limit_enforced"), payer, recipient]],
+          ["short topics", [xdr.ScVal.scvSymbol("spending_limit_enforced")]],
+          ["non-symbol topic", [xdr.ScVal.scvString("policy"), payer, recipient]],
+          ["empty topics", []],
+        ] satisfies [string, xdr.ScVal[]][])(
+          "should accept %s events before and after the transfer",
+          async (_, topics) => {
+            for (const position of ["first", "last"] as const) {
+              expect(await verifyEvents(topics, policyContract, position)).toEqual(
+                validVerifyResponse(CLIENT_PUBLIC),
+              );
+            }
+          },
+        );
+
+        it("should reject informational events without a transfer", async () => {
+          const result = await verifyEvents(
+            [xdr.ScVal.scvSymbol("spending_limit_enforced")],
+            policyContract,
+            "none",
+          );
+          expect(result).toEqual(
+            invalidVerifyResponse(
+              "invalid_exact_stellar_payload_no_transfer_events",
+              CLIENT_PUBLIC,
+            ),
+          );
+        });
+
+        it.each(["mint", "burn", "clawback"])(
+          "should reject an additional %s from any contract",
+          async symbol => {
+            const topics = [xdr.ScVal.scvSymbol(symbol), payer];
+            if (symbol === "mint") topics.push(recipient);
+
+            for (const contractId of [expectedAssetHash(), policyContract]) {
+              for (const position of ["first", "last"] as const) {
+                expect(await verifyEvents(topics, contractId, position)).toEqual(
+                  invalidVerifyResponse(
+                    "invalid_exact_stellar_payload_event_not_transfer",
+                    CLIENT_PUBLIC,
+                  ),
+                );
+              }
+            }
+          },
+        );
+
+        it.each([1, 2])("should reject a transfer event with only %i topics", async topicCount => {
+          const topics = [xdr.ScVal.scvSymbol("transfer"), payer].slice(0, topicCount);
+          expect(await verifyEvents(topics)).toEqual(
+            invalidVerifyResponse(
+              "invalid_exact_stellar_payload_event_not_transfer",
+              CLIENT_PUBLIC,
+            ),
+          );
+        });
       });
 
       it("should ignore non-contract events and still accept valid transfer", async () => {

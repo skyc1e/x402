@@ -1065,7 +1065,7 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
         );
       });
 
-      it("should reject when transfer event has wrong asset (contract address)", async () => {
+      it("should reject when no transfer comes from the expected asset", async () => {
         const wrongAsset = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
         const mockTransferEvent = createMockContractEvent({
           from: CLIENT_PUBLIC,
@@ -1087,7 +1087,7 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
 
         const result = await facilitator.verify(validPayload, validRequirements);
         expect(result.isValid).toBe(false);
-        expect(result.invalidReason).toBe("invalid_exact_stellar_payload_event_wrong_asset");
+        expect(result.invalidReason).toBe("invalid_exact_stellar_payload_no_transfer_events");
       });
 
       it("should reject when no transfer events are present", async () => {
@@ -1113,6 +1113,7 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
           to: FACILITATOR_PUBLIC,
           amount: BigInt(10000),
           fnName: "mint", // ❌ event is not "transfer"
+          contractId: expectedAssetHash(),
         });
 
         vi.mocked(mockServer.simulateTransaction).mockResolvedValueOnce({
@@ -1138,7 +1139,7 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
 
         const verifyEvents = (
           topics: xdr.ScVal[],
-          contractId = policyContract,
+          contractId: xdr.Hash | null = policyContract,
           transferPosition: "first" | "last" | "none" = "last",
         ) => {
           const extraEvent = createMockDiagnosticEvent(
@@ -1176,10 +1177,12 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
         ] satisfies [string, xdr.ScVal[]][])(
           "should accept %s events before and after the transfer",
           async (_, topics) => {
-            for (const position of ["first", "last"] as const) {
-              expect(await verifyEvents(topics, policyContract, position)).toEqual(
-                validVerifyResponse(CLIENT_PUBLIC),
-              );
+            for (const contractId of [expectedAssetHash(), policyContract]) {
+              for (const position of ["first", "last"] as const) {
+                expect(await verifyEvents(topics, contractId, position)).toEqual(
+                  validVerifyResponse(CLIENT_PUBLIC),
+                );
+              }
             }
           },
         );
@@ -1198,28 +1201,64 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
           );
         });
 
-        it.each(["mint", "burn", "clawback"])(
-          "should reject an additional %s from any contract",
+        it.each(["mint", "burn", "clawback", "transfer"])(
+          "should accept a custom %s from another contract before and after the transfer",
           async symbol => {
             const topics = [xdr.ScVal.scvSymbol(symbol), payer];
-            if (symbol === "mint") topics.push(recipient);
+            if (symbol === "mint" || symbol === "transfer") topics.push(recipient);
 
-            for (const contractId of [expectedAssetHash(), policyContract]) {
-              for (const position of ["first", "last"] as const) {
-                expect(await verifyEvents(topics, contractId, position)).toEqual(
-                  invalidVerifyResponse(
-                    "invalid_exact_stellar_payload_event_not_transfer",
-                    CLIENT_PUBLIC,
-                  ),
-                );
-              }
+            for (const position of ["first", "last"] as const) {
+              expect(await verifyEvents(topics, policyContract, position)).toEqual(
+                validVerifyResponse(CLIENT_PUBLIC),
+              );
             }
           },
         );
 
+        it.each(["mint", "burn", "clawback", "transfer"])(
+          "should reject a custom %s without a payment-asset transfer",
+          async symbol => {
+            const topics = [xdr.ScVal.scvSymbol(symbol), payer, recipient];
+            expect(await verifyEvents(topics, policyContract, "none")).toEqual(
+              invalidVerifyResponse(
+                "invalid_exact_stellar_payload_no_transfer_events",
+                CLIENT_PUBLIC,
+              ),
+            );
+          },
+        );
+
+        it.each(["mint", "burn", "clawback"])(
+          "should reject an additional %s from the payment asset before and after the transfer",
+          async symbol => {
+            const topics = [xdr.ScVal.scvSymbol(symbol), payer];
+            if (symbol === "mint") topics.push(recipient);
+
+            for (const position of ["first", "last"] as const) {
+              expect(await verifyEvents(topics, expectedAssetHash(), position)).toEqual(
+                invalidVerifyResponse(
+                  "invalid_exact_stellar_payload_event_not_transfer",
+                  CLIENT_PUBLIC,
+                ),
+              );
+            }
+          },
+        );
+
+        it("should reject an informational contract event without an emitter", async () => {
+          expect(
+            await verifyEvents([xdr.ScVal.scvSymbol("spending_limit_enforced")], null),
+          ).toEqual(
+            invalidVerifyResponse(
+              "invalid_exact_stellar_payload_event_missing_contract_id",
+              CLIENT_PUBLIC,
+            ),
+          );
+        });
+
         it.each([1, 2])("should reject a transfer event with only %i topics", async topicCount => {
           const topics = [xdr.ScVal.scvSymbol("transfer"), payer].slice(0, topicCount);
-          expect(await verifyEvents(topics)).toEqual(
+          expect(await verifyEvents(topics, expectedAssetHash())).toEqual(
             invalidVerifyResponse(
               "invalid_exact_stellar_payload_event_not_transfer",
               CLIENT_PUBLIC,

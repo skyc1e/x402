@@ -607,7 +607,7 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
 
   /**
    * Validates simulation events for transfer correctness.
-   * Ensures there is exactly one token transfer event, the transfer matches the
+   * Ensures there is exactly one payment-token transfer event, the transfer matches the
    * expected sender, recipient, amount, and asset (contract address), and the
    * facilitator address is not involved in the transfer.
    *
@@ -643,13 +643,27 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
           continue;
         }
 
+        const contractIdHash = event.contractId();
+        if (!contractIdHash)
+          return invalidVerifyResponse(
+            "invalid_exact_stellar_payload_event_missing_contract_id",
+            fromAddress,
+          );
+        const eventContractAddress = Address.fromScAddress(
+          xdr.ScAddress.scAddressTypeContract(contractIdHash),
+        ).toString();
+        // Event topics are contract-defined; only interpret the payment token's events.
+        if (eventContractAddress !== expectedAsset) {
+          continue;
+        }
+
         const body = event.body().v0();
         const topics = body.topics();
 
         const symbol =
           topics[0]?.switch().name === "scvSymbol" ? topics[0].sym().toString() : undefined;
         if (symbol !== "transfer") {
-          // Ignore informational events, but reject additional token balance changes.
+          // Ignore informational events, but reject additional payment-token balance changes.
           if (symbol === "mint" || symbol === "burn" || symbol === "clawback") {
             return invalidVerifyResponse(
               "invalid_exact_stellar_payload_event_not_transfer",
@@ -662,22 +676,6 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
         if (topics.length < 3) {
           return invalidVerifyResponse(
             "invalid_exact_stellar_payload_event_not_transfer",
-            fromAddress,
-          );
-        }
-
-        const contractIdHash = event.contractId();
-        if (!contractIdHash)
-          return invalidVerifyResponse(
-            "invalid_exact_stellar_payload_event_missing_contract_id",
-            fromAddress,
-          );
-        const eventContractAddress = Address.fromScAddress(
-          xdr.ScAddress.scAddressTypeContract(contractIdHash),
-        ).toString();
-        if (eventContractAddress !== expectedAsset) {
-          return invalidVerifyResponse(
-            "invalid_exact_stellar_payload_event_wrong_asset",
             fromAddress,
           );
         }
